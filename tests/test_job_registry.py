@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ingestion.job_sources import is_brazilian_compatible, is_english_job
+from ingestion.job_sources import is_brazilian_compatible, is_english_job, matches_query
 from storage.job_registry import save_jobs_markdown
 
 
@@ -61,6 +61,35 @@ class SaveJobsMarkdownTests(unittest.TestCase):
 
         self.assertTrue(is_english_job(type("Job", (), english_job)()))
         self.assertFalse(is_english_job(type("Job", (), portuguese_job)()))
+
+    def test_matches_query_allows_partial_keyword_matches(self):
+        job = type(
+            "Job",
+            (),
+            {
+                "titulo": "Senior Data Engineer",
+                "descricao_completa": "Trabalhamos com Python, SQL e pipelines de dados para IA.",
+            },
+        )()
+
+        self.assertTrue(matches_query(job, "Data Engineer|Python|AI Engineer"))
+        self.assertTrue(matches_query(job, "Machine Learning|Data Engineer"))
+        self.assertFalse(matches_query(job, "React Native|NodeJS|Kubernetes"))
+
+    def test_is_english_job_keeps_brazilian_remote_java_jobs(self):
+        brazilian_remote_java_job = type(
+            "Job",
+            (),
+            {
+                "titulo": "Java Backend Engineer",
+                "empresa": "Nubank",
+                "localizacao": "Remote - Brazil",
+                "descricao_completa": "We are looking for a Java Backend Engineer with Spring Boot, REST APIs, and SQL. This is a remote role based in Brazil.",
+                "link_vaga": "https://example.com/java-remote-br",
+            },
+        )()
+
+        self.assertFalse(is_english_job(brazilian_remote_java_job))
 
 
 if __name__ == "__main__":

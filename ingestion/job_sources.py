@@ -23,19 +23,33 @@ def configured_values(name: str) -> list[str]:
     return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
 
 
-def matches_query(job: JobRawPayload, query: str) -> bool:
-    terms = [
-    "".join(character for character in unicodedata.normalize("NFD", term.lower())
-                if unicodedata.category(character) != "Mn")
-    for term in query.split("|")
-        if term.strip()
-    ]
-    searchable = "".join(
-        character for character in unicodedata.normalize(
-            "NFD", f"{job.titulo} {job.descricao_completa}".lower()
-        ) if unicodedata.category(character) != "Mn"
+def _normalize_text(value: str) -> str:
+    return "".join(
+        character for character in unicodedata.normalize("NFD", (value or "").lower())
+        if unicodedata.category(character) != "Mn"
     )
-    return not terms or any(term in searchable for term in terms)
+
+
+def matches_query(job: JobRawPayload, query: str) -> bool:
+    terms = [_normalize_text(term) for term in query.split("|") if term.strip()]
+    searchable = _normalize_text(f"{job.titulo} {job.descricao_completa}")
+
+    if not terms:
+        return True
+
+    for term in terms:
+        if term in searchable:
+            return True
+
+        tokens = [token for token in re.split(r"[^a-z0-9]+", term) if token]
+        if len(tokens) <= 1:
+            continue
+
+        matches = sum(1 for token in tokens if token in searchable)
+        if matches >= max(1, len(tokens) - 1):
+            return True
+
+    return False
 
 
 def is_brazilian_compatible(location: str) -> bool:
@@ -47,17 +61,6 @@ def is_brazilian_compatible(location: str) -> bool:
     )
 
     if not normalized:
-        return True
-
-    foreign_markers = (
-        "united states", "usa", "canada", "australia", "ireland", "uk", "united kingdom",
-        "england", "germany", "france", "spain", "italy", "netherlands", "sweden", "norway",
-        "denmark", "finland", "mexico", "argentina", "chile", "colombia", "peru", "uruguay",
-        "panama", "ecuador", "paraguay", "bolivia", "costa rica", "guatemala", "el salvador",
-        "honduras", "nicaragua", "dominican republic", "puerto rico", "portugal", "eua",
-        "inglaterra", "irlanda", "mexico city",
-    )
-    if any(marker in normalized for marker in foreign_markers):
         return False
 
     brazil_markers = (
@@ -75,7 +78,7 @@ def is_brazilian_compatible(location: str) -> bool:
 
 
 def is_english_job(job: object) -> bool:
-    """Desconsidera vagas escritas em inglês com base em frases e padrões muito claros do idioma."""
+    """Desconsidera vagas em inglês puro, mas mantém vagas brasileiras remotas com Java/Spring/Backend mesmo que tenham partes em inglês."""
     title = str(getattr(job, "titulo", "") or "")
     company = str(getattr(job, "empresa", "") or "")
     location = str(getattr(job, "localizacao", "") or "")
@@ -88,6 +91,16 @@ def is_english_job(job: object) -> bool:
     normalized = "".join(
         character for character in unicodedata.normalize("NFD", combined)
         if unicodedata.category(character) != "Mn"
+    )
+
+    john_brazil_markers = (
+        "brazil", "brasil", "remote - brazil", "remoto - brasil", "remote brazil",
+        "remoto brasil", "sao paulo", "sp", "rio de janeiro", "belo horizonte",
+        "curitiba", "portugal", "brasileiro", "brasilia",
+    )
+    java_backend_markers = (
+        "java", "spring", "spring boot", "backend", "backend engineer", "java backend",
+        "java developer", "microservices", "rest api", "api rest", "java spring",
     )
 
     strong_english_patterns = (
@@ -136,8 +149,14 @@ def is_english_job(job: object) -> bool:
         "sao paulo",
     )
 
+    has_brazil_context = any(marker in normalized for marker in john_brazil_markers)
+    has_java_backend_context = any(marker in normalized for marker in java_backend_markers)
+
     english_hits = sum(1 for pattern in strong_english_patterns if pattern in normalized)
     pt_hits = sum(1 for pattern in strong_portuguese_patterns if pattern in normalized)
+
+    if has_brazil_context and has_java_backend_context:
+        return False
 
     if english_hits >= 1 and pt_hits == 0:
         return True
@@ -145,7 +164,7 @@ def is_english_job(job: object) -> bool:
     if english_hits >= 2:
         return True
 
-    if english_hits >= 1 and "remote" in normalized and "brasil" not in normalized and "sao paulo" not in normalized:
+    if english_hits >= 1 and "remote" in normalized and not has_brazil_context:
         return True
 
     return False

@@ -1,16 +1,42 @@
 import os
+from pathlib import Path
+
 from pypdf import PdfReader
 
 
-KNOWN_TECHNOLOGIES = (
-    "Python", "SQL", "Java", "JavaScript", "TypeScript", "AWS", "Azure",
-    "GCP", "Docker", "Git", "Machine Learning", "Deep Learning", "Angular",
-    "LLM", "LLMs", "RAG", "Power BI", "Excel",
-)
-KNOWN_ROLES = (
-    "Engenheiro de IA", "AI Engineer", "Data Engineer", "Machine Learning Engineer",
-    "Data Scientist", "Analista de Dados", "Dev SR", "Software Engineer",
-)
+KEYWORDS_PATH = Path(__file__).with_name("profile_keywords.md")
+
+
+def _load_keywords_from_markdown(path: Path = KEYWORDS_PATH) -> tuple[list[str], list[str]]:
+    """Lê as listas de tecnologias e cargos de um arquivo Markdown."""
+    if not path.exists():
+        return [], []
+
+    section = None
+    technologies: list[str] = []
+    roles: list[str] = []
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.lower() == "## tecnologias":
+            section = "technologies"
+            continue
+        if line.lower() == "## cargos":
+            section = "roles"
+            continue
+        if line.startswith("-"):
+            value = line[1:].strip()
+            if not value:
+                continue
+            if section == "technologies":
+                technologies.append(value)
+            elif section == "roles":
+                roles.append(value)
+
+    return technologies, roles
+
+
+KNOWN_TECHNOLOGIES, KNOWN_ROLES = _load_keywords_from_markdown()
 
 class ProfileExtractor:
     def __init__(self, pdf_path: str):
@@ -39,11 +65,17 @@ class ProfileExtractor:
         
         # Adiciona competências padrão caso não encontre no PDF de teste
         if not skills_detectadas:
-            skills_detectadas = ["Resolução de Problemas", "Gestão de Projetos"]
+            skills_detectadas = ["Python", "SQL", "Java", "Spring Boot", "Git", "AWS"]
 
         cargos_detectados = [role for role in KNOWN_ROLES if role.lower() in raw_text.lower()]
         if not cargos_detectados:
-            cargos_detectados = [objetivo]
+            cargos_detectados = [
+                "Engenheiro de IA",
+                "Desenvolvedor Java",
+                "Data Engineer",
+                "Software Engineer",
+                objetivo,
+            ]
 
         return {
             "nome": "Usuário Identificado via PDF",
