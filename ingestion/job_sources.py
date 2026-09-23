@@ -1,239 +1,16 @@
 import os
 import re
-import unicodedata
-import urllib.robotparser
-from email import policy
-from email.parser import BytesParser
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from email.parser import BytesParser
 from xml.etree import ElementTree
 
 import requests
 
 from data_contracts.job_contracts import JobRawPayload
-from ingestion.search_profile import load_search_terms
-
-
-BLOCKED_HOSTS = {"linkedin.com", "www.linkedin.com", "vagas.com.br", "www.vagas.com.br"}
-
-
-def configured_values(name: str) -> list[str]:
-    return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
-
-
-def _normalize_text(value: str) -> str:
-    return "".join(
-        character for character in unicodedata.normalize("NFD", (value or "").lower())
-        if unicodedata.category(character) != "Mn"
-    )
-
-
-def matches_query(job: JobRawPayload, query: str) -> bool:
-    terms = [_normalize_text(term) for term in query.split("|") if term.strip()]
-    searchable = _normalize_text(f"{job.titulo} {job.descricao_completa}")
-
-    if not terms:
-        return True
-
-    for term in terms:
-        if term in searchable:
-            return True
-
-        tokens = [token for token in re.split(r"[^a-z0-9]+", term) if token]
-        if len(tokens) <= 1:
-            continue
-
-        matches = sum(1 for token in tokens if token in searchable)
-        if matches >= max(1, len(tokens) - 1):
-            return True
-
-    return False
-
-
-def is_brazilian_compatible(location: str) -> bool:
-    """Rejeita vagas no exterior, aceitando apenas Brasil ou trabalho remoto sem país explícito."""
-    normalized = " ".join((location or "").lower().split())
-    normalized = "".join(
-        character for character in unicodedata.normalize("NFD", normalized)
-        if unicodedata.category(character) != "Mn"
-    )
-
-    if not normalized:
-        return False
-
-    brazil_markers = (
-        "brasil", "brazil", "sao paulo", "rio de janeiro", "belo horizonte", "curitiba",
-        "porto alegre", "salvador", "recife", "campinas", "florianopolis", "niteroi",
-        "fortaleza", "goiania", "manaus", "brasilia", "sao paulo-sp", "sp"
-    )
-    if any(marker in normalized for marker in brazil_markers):
-        return True
-
-    if "remote" in normalized or "remoto" in normalized:
-        return True
-
-    return True
-
-
-def is_english_job(job: object) -> bool:
-    """Desconsidera vagas em inglês puro, mas mantém vagas brasileiras remotas com Java/Spring/Backend mesmo que tenham partes em inglês."""
-    title = str(getattr(job, "titulo", "") or "")
-    company = str(getattr(job, "empresa", "") or "")
-    location = str(getattr(job, "localizacao", "") or "")
-    description = str(getattr(job, "descricao_completa", "") or "")
-    combined = " ".join([title, company, location, description]).lower()
-
-    if not combined.strip():
-        return False
-
-    normalized = "".join(
-        character for character in unicodedata.normalize("NFD", combined)
-        if unicodedata.category(character) != "Mn"
-    )
-
-    john_brazil_markers = (
-        "brazil", "brasil", "remote - brazil", "remoto - brasil", "remote brazil",
-        "remoto brasil", "sao paulo", "sp", "rio de janeiro", "belo horizonte",
-        "curitiba", "portugal", "brasileiro", "brasilia",
-    )
-    java_backend_markers = (
-        "java", "spring", "spring boot", "backend", "backend engineer", "java backend",
-        "java developer", "microservices", "rest api", "api rest", "java spring",
-    )
-
-    strong_english_patterns = (
-        "we are looking for",
-        "about the role",
-        "responsibilities",
-        "requirements",
-        "what you'll do",
-        "must have",
-        "ideal candidate",
-        "apply now",
-        "job description",
-        "customer success manager",
-        "senior software engineer",
-        "software engineer",
-        "data engineer",
-        "frontend engineer",
-        "full stack",
-        "please mention the word",
-        "you will be responsible for",
-        "strong background in",
-        "work with cross functional teams",
-        "build scalable",
-        "company is looking for",
-        "hiring",
-        "position",
-        "team",
-        "with a strong bias",
-    )
-    strong_portuguese_patterns = (
-        "estamos buscando",
-        "estamos contratando",
-        "vagas para",
-        "perfil desejado",
-        "obrigatorio",
-        "desejavel",
-        "engenheiro",
-        "analista",
-        "desenvolvedor",
-        "engenharia",
-        "ciencia de dados",
-        "dados",
-        "inteligencia artificial",
-        "remoto",
-        "brasil",
-        "sao paulo",
-    )
-
-    has_brazil_context = any(marker in normalized for marker in john_brazil_markers)
-    has_java_backend_context = any(marker in normalized for marker in java_backend_markers)
-
-    english_hits = sum(1 for pattern in strong_english_patterns if pattern in normalized)
-    pt_hits = sum(1 for pattern in strong_portuguese_patterns if pattern in normalized)
-
-    if has_brazil_context and has_java_backend_context:
-        return False
-
-    if english_hits >= 1 and pt_hits == 0:
-        return True
-
-    if english_hits >= 2:
-        return True
-
-    if english_hits >= 1 and "remote" in normalized and not has_brazil_context:
-        return True
-
-    return False
-
-
-def validate_source_url(url: str) -> None:
-    parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme not in {"http", "https"} or not hostname:
-        raise ValueError(f"URL de fonte invalida: {url}")
-    if hostname in BLOCKED_HOSTS or any(hostname.endswith(f".{host}") for host in BLOCKED_HOSTS):
-        raise ValueError(f"Fonte bloqueada por seguranca: {hostname}")
-
-
-class _HtmlTextParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.title_parts: list[str] = []
-        self.text_parts: list[str] = []
-        self.meta: dict[str, str] = {}
-        self._in_title = False
-        self._ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        if tag == "title":
-            self._in_title = True
-        if tag == "meta":
-            key = attributes.get("name") or attributes.get("property")
-            content = attributes.get("content")
-            if key and content:
-                self.meta[key.lower()] = content.strip()
-        if tag in {"script", "style", "noscript"}:
-            self._ignored_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "title":
-            self._in_title = False
-        if tag in {"script", "style", "noscript"} and self._ignored_depth:
-            self._ignored_depth -= 1
-
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth:
-            return
-        text = " ".join(data.split())
-        if not text:
-            return
-        if self._in_title:
-            self.title_parts.append(text)
-        self.text_parts.append(text)
-
-    @property
-    def title(self) -> str:
-        return " ".join(self.title_parts).strip()
-
-    @property
-    def text(self) -> str:
-        return " ".join(self.text_parts).strip()
-
-
-def _job(title: str, company: str, location: str, description: str, link: str) -> JobRawPayload:
-    return JobRawPayload(
-        titulo=title.strip() or "Vaga sem titulo",
-        empresa=company.strip() or "Empresa nao informada",
-        localizacao=location.strip() or "Nao informada",
-        descricao_completa=description.strip() or "Descricao nao informada",
-        link_vaga=link.strip() or "Fonte sem link",
-    )
-
+from .filters import matches_query
+from .source_utils import validate_source_url, _job, _HtmlTextParser
 
 class RssJobSource:
     def __init__(self, session: requests.Session | None = None) -> None:
@@ -243,7 +20,7 @@ class RssJobSource:
         validate_source_url(feed_url)
         response = self.session.get(feed_url, timeout=20, headers={"User-Agent": "AIJobsHarness/1.0"})
         response.raise_for_status()
-        root = ElementTree.fromstring(response.content)
+        root = ElementTree.fromstring(response.content) # type: ignore
         jobs: list[JobRawPayload] = []
         for item in root.iter():
             if item.tag.rsplit("}", 1)[-1].lower() not in {"item", "entry"}:
@@ -265,6 +42,7 @@ class RssJobSource:
 
 class NewsletterJobSource:
     def fetch(self, file_path: str) -> list[JobRawPayload]:
+        from email import policy
         message = BytesParser(policy=policy.default).parsebytes(Path(file_path).read_bytes())
         subject = str(message.get("subject", "Vagas da newsletter"))
         body = message.get_body(preferencelist=("plain", "html"))
@@ -281,6 +59,7 @@ class AllowlistedCrawler:
         self.session = session or requests.Session()
 
     def fetch(self, url: str) -> list[JobRawPayload]:
+        import urllib.robotparser
         validate_source_url(url)
         parsed = urlparse(url)
         hostname = (parsed.hostname or "").lower().removeprefix("www.")
@@ -473,80 +252,42 @@ class JoobleSource(PartnerApiSource):
 
 
 def collect_jobs() -> list[JobRawPayload]:
+    """Orquestra a coleta de vagas de todas as fontes habilitadas."""
     jobs: list[JobRawPayload] = []
-    rss = RssJobSource()
-    newsletter = NewsletterJobSource()
-    crawler = AllowlistedCrawler(configured_values("JOB_CRAWLER_ALLOWED_DOMAINS"))
-    api = PartnerApiSource()
-    search_roles, search_technologies = load_search_terms()
-    query = "|".join(search_roles + search_technologies)
-    location = os.getenv("JOB_SEARCH_LOCATION", "")
+    query = os.getenv("JOB_QUERY", "AI Engineer")
 
-    def collect(label: str, loader: Any) -> None:
-        print(f"[FONTE] Consultando {label}...")
+    # 1. Coleta do Remote OK
+    try:
+        remote_ok = RemoteOkSource()
+        fetched_remote = remote_ok.fetch(query)
+        jobs.extend(fetched_remote)
+        print(f"[FONTE] Remote OK: {len(fetched_remote)} vagas coletadas.")
+    except Exception as e:
+        print(f"[FONTE] Erro ao coletar do Remote OK: {e}")
+
+    # 2. Coleta do Remotive
+    try:
+        remotive = RemotiveSource()
+        fetched_remotive = remotive.fetch(query)
+        jobs.extend(fetched_remotive)
+        print(f"[FONTE] Remotive: {len(fetched_remotive)} vagas coletadas.")
+    except Exception as e:
+        print(f"[FONTE] Erro ao coletar do Remotive: {e}")
+
+    # 3. Coleta do Adzuna (se as credenciais estiverem no .env)
+    adzuna_app_id = os.getenv("ADZUNA_APP_ID")
+    adzuna_app_key = os.getenv("ADZUNA_APP_KEY")
+    if adzuna_app_id and adzuna_app_key:
         try:
-            source_jobs = loader()
-            jobs.extend(source_jobs)
-            print(f"[FONTE] {label}: {len(source_jobs)} vaga(s) encontrada(s).")
-        except Exception as error:
-            print(f"⚠️ Fonte {label} indisponivel: {error}")
-
-    if os.getenv("JOB_ENABLE_REMOTEOK", "false").lower() == "true":
-        collect("Remote OK", lambda: RemoteOkSource().fetch(query))
-    if os.getenv("JOB_ENABLE_REMOTIVE", "false").lower() == "true":
-        collect("Remotive", lambda: RemotiveSource().fetch(query))
-
-    adzuna_app_id = os.getenv("ADZUNA_APP_ID", "")
-    adzuna_app_key = os.getenv("ADZUNA_APP_KEY", "")
-    adzuna_enabled = os.getenv("JOB_ENABLE_ADZUNA", "true").lower() == "true"
-    if adzuna_enabled and not (adzuna_app_id and adzuna_app_key):
-        print("⚠️ Adzuna esta ativo, mas ADZUNA_APP_ID/ADZUNA_APP_KEY nao foram configurados.")
-    if adzuna_enabled and adzuna_app_id and adzuna_app_key:
-        adzuna = AdzunaSource(
-                adzuna_app_id,
-                adzuna_app_key,
-                os.getenv("ADZUNA_COUNTRY", "br"),
-                int(os.getenv("ADZUNA_PAGE", "1")),
+            adzuna = AdzunaSource(
+                app_id=adzuna_app_id,
+                app_key=adzuna_app_key,
+                country=os.getenv("ADZUNA_COUNTRY", "br")
             )
-        collect("Adzuna", lambda: adzuna.fetch(query, location))
+            fetched_adzuna = adzuna.fetch(query=query, location=os.getenv("ADZUNA_LOCATION", ""))
+            jobs.extend(fetched_adzuna)
+            print(f"[FONTE] Adzuna: {len(fetched_adzuna)} vagas coletadas.")
+        except Exception as e:
+            print(f"[FONTE] Erro ao coletar do Adzuna: {e}")
 
-    jooble_api_key = os.getenv("JOOBLE_API_KEY", "")
-    if os.getenv("JOB_ENABLE_JOOBLE", "false").lower() == "true" and jooble_api_key:
-        jooble = JoobleSource(jooble_api_key)
-        collect("Jooble", lambda: jooble.fetch(query, location, int(os.getenv("JOOBLE_PAGE", "1"))))
-
-    if os.getenv("JOB_ENABLE_RSS", "false").lower() == "true":
-        for url in configured_values("JOB_RSS_URLS"):
-            collect(f"RSS {url}", lambda url=url: rss.fetch(url))
-    if os.getenv("JOB_ENABLE_NEWSLETTER", "false").lower() == "true":
-        for file_path in configured_values("JOB_NEWSLETTER_FILES"):
-            collect(f"Newsletter {file_path}", lambda file_path=file_path: newsletter.fetch(file_path))
-    if os.getenv("JOB_ENABLE_PARTNER_API", "false").lower() == "true":
-        for url in configured_values("JOB_PARTNER_API_URLS"):
-            collect(f"API {url}", lambda url=url: api.fetch(url))
-    if os.getenv("JOB_ENABLE_CRAWLER", "false").lower() == "true":
-        for url in configured_values("JOB_CRAWLER_URLS"):
-            collect(f"Crawler {url}", lambda url=url: crawler.fetch(url))
-
-    unique_jobs: dict[str, JobRawPayload] = {}
-    for job in jobs:
-        unique_jobs.setdefault(job.link_vaga, job)
-
-    filtered = []
-    rejected_foreign = 0
-    rejected_english = 0
-
-    for job in unique_jobs.values():
-        if not is_brazilian_compatible(job.localizacao):
-            rejected_foreign += 1
-            continue
-        if is_english_job(job):
-            rejected_english += 1
-            continue
-        filtered.append(job)
-
-    if rejected_foreign:
-        print(f"[FILTRO] {rejected_foreign} vaga(s) de fora do Brasil foram descartadas.")
-    if rejected_english:
-        print(f"[FILTRO] {rejected_english} vaga(s) em inglês foram descartadas.")
-    return filtered
+    return jobs

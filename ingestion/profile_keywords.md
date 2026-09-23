@@ -10,19 +10,15 @@
 - TypeScript
 - AWS
 - Azure
-- GCP
-- Docker
-- Kubernetes
 - Git
 - Machine Learning
-- Deep Learning
 - Angular
 - LLM
 - LLMs
 - RAG
 - Power BI
-- Excel
 - Microservicos
+- Monolito
 - API REST
 - Back-end
 - Backend
@@ -42,3 +38,4 @@
 - Senior Java Developer
 - Engenheiro de Software
 - Analista de Sistemas
+- Java Backend

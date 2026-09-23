@@ -1,6 +1,5 @@
 import time
 
-# evaluation/engine.py
 from google import genai
 from google.genai import types
 from config.environment import Config
@@ -44,7 +43,7 @@ def real_ai_agent(raw_job: dict, user_profile: dict) -> JobEvaluationResult:
     Descrição: {raw_job.get('descricao_completa')}
     """
 
-    print(f"[IA REAL] Enviando vaga '{raw_job.get('titulo')}' ao Gemini...")
+    print(f"[IA REAL] Enviando vaga '{raw_job.get('titulo')}' ao Gemini!")
 
     # Chamada forçando o Structured Output baseado no nosso contrato Pydantic
     request_config = types.GenerateContentConfig(
